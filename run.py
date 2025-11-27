@@ -143,7 +143,9 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho(f"Processing file {i+1} of {total_files}: {relative_path.as_posix()}", fg="yellow")
         # Modify BLDatabaseManager.sqlite
         # Copy BLDatabaseManager.sqlite to tmp.BLDatabaseManager.sqlite
-        filetooverwritename = str(path.joinpath(relative_path))
+        filetooverwritename = str(path.name)
+        click.secho(f"File to overwrite on device: {filetooverwritename}", fg="bright_black")
+        click.secho("Relative path: " + str(relative_path), fg="bright_black")
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
         blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
         cursor = blconn.cursor()
@@ -228,14 +230,19 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho("If this takes more than a minute please try again.", fg="yellow")
         click.secho("Waiting for file overwrite to complete...", fg="yellow")
         success_message = ") [Install-Mgr]: Marking download as [finished]"
+        cancelled_message = ") [Install-Mgr]: Marking download as [cancelled]"
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
             # click.secho(f"Syslog: {syslog_entry.message}", fg="bright_black")
-            if "download" in syslog_entry.message:
-                click.secho(f"Found download message: {syslog_entry.message}", fg="bright_black")
+            if "Install-Mgr" in syslog_entry.message:
+                click.secho(f"Found Install-Mgr message: {syslog_entry.message}", fg="bright_black")
             if success_message in syslog_entry.message:
                 click.secho(f"Found install-mgr success message: {syslog_entry.message}", fg="bright_black")
             if (PurePosixPath(syslog_entry.filename).name == 'bookassetd') and \
-                    success_message in syslog_entry.message and str(path) in syslog_entry.message:
+                    success_message in syslog_entry.message and relative_path.name in syslog_entry.message:
+                    break
+            if (PurePosixPath(syslog_entry.filename).name == 'bookassetd') and \
+                    cancelled_message in syslog_entry.message and relative_path.name in syslog_entry.message:
+                    click.secho("Error: File overwrite was cancelled.", fg="red")
                     break
         pc.kill(pid_bookassetd)
     click.secho("Overwrite successful! Respringing...", fg="green")
