@@ -132,7 +132,6 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         # Upload the file
         click.secho(f"Uploading {overridefile.name}", fg="yellow")
         remote_file_path = f"Downloads/{path.name}"
-        ensure_afc_directory(afc, remote_file_path)
         afc.push(overridefile, remote_file_path)
 
 
@@ -152,12 +151,19 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
         blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
         cursor = blconn.cursor()
+        print(f"""
+        UPDATE ZBLDOWNLOADINFO
+        SET 
+            ZASSETPATH = '{filetooverwritename}.zassetpath',
+            ZDOWNLOADID = '../../../../../../{filetooverwritename}',
+            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
+        """)
         cursor.execute(f"""
         UPDATE ZBLDOWNLOADINFO
         SET 
             ZASSETPATH = '{filetooverwritename}.zassetpath',
-            ZDOWNLOADID = '../../../../../../{relative_path}',
-            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path}'
+            ZDOWNLOADID = '../../../../../../{filetooverwritename}',
+            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
         """)
         blconn.commit()
 
@@ -210,7 +216,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho("Waiting for itunesstored to finish download...", fg="yellow")
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
             if "Install complete for download: 6936249076851270150 result: Failed" in syslog_entry.message:
-                click.secho("download complete!", fg="bright_black")
+                click.secho("Download complete!", fg="bright_black")
                 break
         
         # Kill bookassetd and Books processes to trigger file overwrite
@@ -225,7 +231,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         
         # Re-open Books app
         try:
-            pc.launch("com.apple.iBooks")
+            click.secho(f"Started Books with pid {pc.launch("com.apple.iBooks")}", fg="yellow")
         except Exception as e:
             click.secho(f"Error launching Books app: {e}", fg="red")
             return
