@@ -14,7 +14,7 @@ import time
 import threading
 import functools
 import plistlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Timer
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
@@ -51,6 +51,18 @@ def start_http_server():
     info_queue.put((get_lan_ip(), httpd.server_port))
     httpd.serve_forever()
 
+def ensure_afc_directory(afc: AfcService, remote_path: str):
+    """Ensure all parent directories exist on the device."""
+    parts = PurePosixPath(remote_path).parent.parts
+    current_path = ""
+    for part in parts:
+        current_path = f"{current_path}/{part}" if current_path else part
+        try:
+            afc.makedirs(current_path)
+        except Exception:
+            # Directory might already exist
+            pass
+
 def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxyService):
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
@@ -61,7 +73,8 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     pc = ProcessControl(dvt)
     
     # Find bookassetd container UUID
-    uuid = open("uuid.txt", "r").read().strip() if Path("uuid.txt").exists() else ""
+    uuid_file = Path("uuid.txt")
+    uuid = uuid_file.read_text().strip() if uuid_file.exists() else ""
     if len(uuid) < 10:
         try:
             pc.launch("com.apple.iBooks")
@@ -71,66 +84,19 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho("Finding bookassetd container UUID...", fg="yellow")
         click.secho("Please open Books app and download a book to continue.", fg="yellow")
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
-            if (posixpath.basename(syslog_entry.filename) != 'bookassetd') or \
+            if (PurePosixPath(syslog_entry.filename).name != 'bookassetd') or \
                     not "/Documents/BLDownloads/" in syslog_entry.message:
                 continue
             uuid = syslog_entry.message.split("/var/containers/Shared/SystemGroup/")[1] \
                     .split("/Documents/BLDownloads")[0]
             click.secho(f"Found bookassetd container UUID: {uuid}", fg="yellow")
-            with open("uuid.txt", "w") as f:
-                f.write(uuid)
+            uuid_file.write_text(uuid)
             break
     else:
         click.secho("Saved bookassetd container UUID: " + uuid, fg="green")
     
     
-    # Modify BLDatabaseManager.sqlite
-    # Copy BLDatabaseManager.sqlite to tmp.BLDatabaseManager.sqlite
-    filetooverwritename = os.path.basename(path)
-    shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
-    blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
-    cursor = blconn.cursor()
-    cursor.execute(f"""
-    UPDATE ZBLDOWNLOADINFO
-    SET 
-        ZASSETPATH = '{path}.zassetpath',
-        ZDOWNLOADID = '../../../../../../{path}',
-        ZPLISTPATH = '/var/mobile/Media/Downloads/{filetooverwritename}'
-    """)
-    blconn.commit()
-
-    # Modify downloads.28.sqlitedb
-    # Copy downloads.28.sqlitedb to tmp.downloads.28.sqlitedb
-    shutil.copyfile("downloads.28.sqlitedb", "tmp.downloads.28.sqlitedb")
-    conn = sqlite3.connect("tmp.downloads.28.sqlitedb")
-    cursor = conn.cursor()
-    bldb_local_prefix = f"/private/var/containers/Shared/SystemGroup/{uuid}/Documents/BLDatabaseManager/BLDatabaseManager.sqlite"
-    cursor.execute(f"""
-    UPDATE asset
-    SET local_path = CASE
-        WHEN local_path LIKE '%/BLDatabaseManager.sqlite'
-            THEN '{bldb_local_prefix}'
-        WHEN local_path LIKE '%/BLDatabaseManager.sqlite-shm'
-            THEN '{bldb_local_prefix}-shm'
-        WHEN local_path LIKE '%/BLDatabaseManager.sqlite-wal'
-            THEN '{bldb_local_prefix}-wal'
-    END
-    WHERE local_path LIKE '/private/var/containers/Shared/SystemGroup/%/Documents/BLDatabaseManager/BLDatabaseManager.sqlite%'
-    """)
     bldb_server_prefix = f"http://{ip}:{port}/tmp.BLDatabaseManager.sqlite"
-    cursor.execute(f"""
-    UPDATE asset
-    SET url = CASE
-        WHEN url LIKE '%/BLDatabaseManager.sqlite'
-            THEN '{bldb_server_prefix}'
-        WHEN url LIKE '%/BLDatabaseManager.sqlite-shm'
-            THEN '{bldb_server_prefix}-shm'
-        WHEN url LIKE '%/BLDatabaseManager.sqlite-wal'
-            THEN '{bldb_server_prefix}-wal'
-    END
-    WHERE url LIKE '%/BLDatabaseManager.sqlite%'
-    """)
-    conn.commit()
 
     # Kill bookassetd and Books processes to stop them from updating BLDatabaseManager.sqlite
     procs = OsTraceService(lockdown=service_provider).get_pid_list().get("Payload")
@@ -143,55 +109,135 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho(f"Killing Books pid {pid_books}...", fg="yellow")
         pc.kill(pid_books)
     
-    # Upload the file
-    click.secho("Uploading " + os.path.basename(overridefile), fg="yellow")
-    AfcService(lockdown=service_provider).push(overridefile, "Downloads/" + os.path.basename(path))
+    total_files = 1
+    relative_files = []
+    remote_file_paths = []
+    if overridefile.is_dir():
+        # Upload directory
+        total_files = 0
+        click.secho(f"Uploading contents of directory {overridefile.name}", fg="yellow")
+        for root, dirs, files in os.walk(overridefile):
+            for file in files:
+                local_file_path = Path(root) / file
+                relative_path = local_file_path.relative_to(overridefile)
+                relative_files.append(relative_path)
+                remote_file_path = f"Downloads/{relative_path.as_posix()}"
+                remote_file_paths.append(remote_file_path)
+                click.secho(f"Uploading {relative_path.as_posix()} to {remote_file_path}", fg="bright_black")
+                # Ensure parent directories exist
+                ensure_afc_directory(afc, remote_file_path)
+                afc.push(local_file_path, remote_file_path)
+                total_files += 1
+    else:
+        # Upload the file
+        click.secho(f"Uploading {overridefile.name}", fg="yellow")
+        remote_file_path = f"Downloads/{path.name}"
+        ensure_afc_directory(afc, remote_file_path)
+        afc.push(overridefile, remote_file_path)
 
-    # Upload downloads.28.sqlitedb
-    click.secho("Uploading downloads.28.sqlitedb", fg="yellow")
-    afc.push("tmp.downloads.28.sqlitedb", "Downloads/downloads.28.sqlitedb")
-    afc.push("tmp.downloads.28.sqlitedb-shm", "Downloads/downloads.28.sqlitedb-shm")
-    afc.push("tmp.downloads.28.sqlitedb-wal", "Downloads/downloads.28.sqlitedb-wal")
-    
-    # Kill itunesstored to trigger BLDataBaseManager.sqlite overwrite
-    procs = OsTraceService(lockdown=service_provider).get_pid_list().get("Payload")
-    pid_itunesstored = next((pid for pid, p in procs.items() if p['ProcessName'] == 'itunesstored'), None)
-    if pid_itunesstored:
-        click.secho(f"Killing itunesstored pid {pid_itunesstored}...", fg="yellow")
-        pc.kill(pid_itunesstored)
-    
-    # Wait for itunesstored to finish download and raise an error
-    click.secho("Waiting for itunesstored to finish download...", fg="yellow")
-    for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
-        if "Install complete for download: 6936249076851270150 result: Failed" in syslog_entry.message:
-            click.secho("download complete!", fg="bright_black")
-            break
-    
-    # Kill bookassetd and Books processes to trigger file overwrite
-    pid_bookassetd = next((pid for pid, p in procs.items() if p['ProcessName'] == 'bookassetd'), None)
-    pid_books = next((pid for pid, p in procs.items() if p['ProcessName'] == 'Books'), None)
-    if pid_bookassetd:
-        click.secho(f"Killing bookassetd pid {pid_bookassetd}...", fg="yellow")
+
+    if total_files == 1:
+        relative_files.append(Path(path.name))
+    # Loop so that we can download multiple files if needed
+    for (i, relative_path) in enumerate(relative_files):
+        click.secho(f"Processing file {i+1} of {total_files}: {relative_path.as_posix()}", fg="yellow")
+        # Modify BLDatabaseManager.sqlite
+        # Copy BLDatabaseManager.sqlite to tmp.BLDatabaseManager.sqlite
+        filetooverwritename = str(path.joinpath(relative_path))
+        shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
+        blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
+        cursor = blconn.cursor()
+        cursor.execute(f"""
+        UPDATE ZBLDOWNLOADINFO
+        SET 
+            ZASSETPATH = '{filetooverwritename}.zassetpath',
+            ZDOWNLOADID = '../../../../../../{relative_path}',
+            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path}'
+        """)
+        blconn.commit()
+
+        # Modify downloads.28.sqlitedb
+        # Copy downloads.28.sqlitedb to tmp.downloads.28.sqlitedb
+        shutil.copyfile("downloads.28.sqlitedb", "tmp.downloads.28.sqlitedb")
+        conn = sqlite3.connect("tmp.downloads.28.sqlitedb")
+        cursor = conn.cursor()
+        bldb_local_prefix = f"/private/var/containers/Shared/SystemGroup/{uuid}/Documents/BLDatabaseManager/BLDatabaseManager.sqlite"
+        cursor.execute(f"""
+        UPDATE asset
+        SET local_path = CASE
+            WHEN local_path LIKE '%/BLDatabaseManager.sqlite'
+                THEN '{bldb_local_prefix}'
+            WHEN local_path LIKE '%/BLDatabaseManager.sqlite-shm'
+                THEN '{bldb_local_prefix}-shm'
+            WHEN local_path LIKE '%/BLDatabaseManager.sqlite-wal'
+                THEN '{bldb_local_prefix}-wal'
+        END
+        WHERE local_path LIKE '/private/var/containers/Shared/SystemGroup/%/Documents/BLDatabaseManager/BLDatabaseManager.sqlite%'
+        """)
+        cursor.execute(f"""
+        UPDATE asset
+        SET url = CASE
+            WHEN url LIKE '%/BLDatabaseManager.sqlite'
+                THEN '{bldb_server_prefix}'
+            WHEN url LIKE '%/BLDatabaseManager.sqlite-shm'
+                THEN '{bldb_server_prefix}-shm'
+            WHEN url LIKE '%/BLDatabaseManager.sqlite-wal'
+                THEN '{bldb_server_prefix}-wal'
+        END
+        WHERE url LIKE '%/BLDatabaseManager.sqlite%'
+        """)
+        conn.commit()
+
+        # Upload downloads.28.sqlitedb
+        click.secho(f"Uploading downloads.28.sqlitedb for file {i+1} of {total_files}", fg="yellow")
+        afc.push("tmp.downloads.28.sqlitedb", "Downloads/downloads.28.sqlitedb")
+        afc.push("tmp.downloads.28.sqlitedb-shm", "Downloads/downloads.28.sqlitedb-shm")
+        afc.push("tmp.downloads.28.sqlitedb-wal", "Downloads/downloads.28.sqlitedb-wal")
+        
+        # Kill itunesstored to trigger BLDataBaseManager.sqlite overwrite
+        procs = OsTraceService(lockdown=service_provider).get_pid_list().get("Payload")
+        pid_itunesstored = next((pid for pid, p in procs.items() if p['ProcessName'] == 'itunesstored'), None)
+        if pid_itunesstored:
+            click.secho(f"Killing itunesstored pid {pid_itunesstored}...", fg="yellow")
+            pc.kill(pid_itunesstored)
+        
+        # Wait for itunesstored to finish download and raise an error
+        click.secho("Waiting for itunesstored to finish download...", fg="yellow")
+        for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
+            if "Install complete for download: 6936249076851270150 result: Failed" in syslog_entry.message:
+                click.secho("download complete!", fg="bright_black")
+                break
+        
+        # Kill bookassetd and Books processes to trigger file overwrite
+        pid_bookassetd = next((pid for pid, p in procs.items() if p['ProcessName'] == 'bookassetd'), None)
+        pid_books = next((pid for pid, p in procs.items() if p['ProcessName'] == 'Books'), None)
+        if pid_bookassetd:
+            click.secho(f"Killing bookassetd pid {pid_bookassetd}...", fg="yellow")
+            pc.kill(pid_bookassetd)
+        if pid_books:
+            click.secho(f"Killing Books pid {pid_books}...", fg="yellow")
+            pc.kill(pid_books)
+        
+        # Re-open Books app
+        try:
+            pc.launch("com.apple.iBooks")
+        except Exception as e:
+            click.secho(f"Error launching Books app: {e}", fg="red")
+            return
+        
+        click.secho("If this takes more than a minute please try again.", fg="yellow")
+        click.secho("Waiting for file overwrite to complete...", fg="yellow")
+        success_message = ") [Install-Mgr]: Marking download as [finished]"
+        for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
+            # click.secho(f"Syslog: {syslog_entry.message}", fg="bright_black")
+            if "download" in syslog_entry.message:
+                click.secho(f"Found download message: {syslog_entry.message}", fg="bright_black")
+            if success_message in syslog_entry.message:
+                click.secho(f"Found install-mgr success message: {syslog_entry.message}", fg="bright_black")
+            if (PurePosixPath(syslog_entry.filename).name == 'bookassetd') and \
+                    success_message in syslog_entry.message and str(path) in syslog_entry.message:
+                    break
         pc.kill(pid_bookassetd)
-    if pid_books:
-        click.secho(f"Killing Books pid {pid_books}...", fg="yellow")
-        pc.kill(pid_books)
-    
-    # Re-open Books app
-    try:
-        pc.launch("com.apple.iBooks")
-    except Exception as e:
-        click.secho(f"Error launching Books app: {e}", fg="red")
-        return
-    
-    click.secho("If this takes more than a minute please try again.", fg="yellow")
-    click.secho("Waiting for file overwrite to complete...", fg="yellow")
-    success_message = path + ") [Install-Mgr]: Marking download as [finished]"
-    for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
-        if (posixpath.basename(syslog_entry.filename) == 'bookassetd') and \
-                success_message in syslog_entry.message:
-            break
-    pc.kill(pid_bookassetd)
     click.secho("Overwrite successful! Respringing...", fg="green")
     procs = OsTraceService(lockdown=service_provider).get_pid_list().get("Payload")
     pid = next((pid for pid, p in procs.items() if p['ProcessName'] == 'backboardd'), None)
@@ -281,8 +327,8 @@ async def connection_context(service_provider):# Create a LockdownClient instanc
         click.secho("Please keep your device unlocked during the process.", fg="blue")
         
         # Validate MobileGestalt file
-        if os.path.basename(path) == "com.apple.MobileGestalt.plist":
-            mg_contents = plistlib.load(open(overridefile, "rb"))
+        if path.name == "com.apple.MobileGestalt.plist":
+            mg_contents = plistlib.load(Path(overridefile).open("rb"))
             cache_extra = mg_contents["CacheExtra"]
             if cache_extra is None:
                 click.secho("Error: Invalid com.apple.MobileGestalt.plist file", fg="red")
@@ -318,8 +364,10 @@ if __name__ == "__main__":
         exit(1)
     
     lockdown = create_using_usbmux()
-    overridefile = sys.argv[1]
-    path = sys.argv[2]
+    # overridefile is the local file to upload
+    overridefile = Path(sys.argv[1])
+    # path is the path on the iOS device to overwrite
+    path = PurePosixPath(sys.argv[2])
     info_queue = queue.Queue()
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(Path(__file__).resolve().parent)
     asyncio.run(connection_context(lockdown))
