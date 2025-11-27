@@ -143,7 +143,10 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho(f"Processing file {i+1} of {total_files}: {relative_path.as_posix()}", fg="yellow")
         # Modify BLDatabaseManager.sqlite
         # Copy BLDatabaseManager.sqlite to tmp.BLDatabaseManager.sqlite
-        filetooverwritename = str(path.name)
+        if total_files == 1:
+            filetooverwritename = str(path)
+        else:
+            filetooverwritename = str(path.joinpath(relative_path))
         click.secho(f"File to overwrite on device: {filetooverwritename}", fg="bright_black")
         click.secho("Relative path: " + str(relative_path), fg="bright_black")
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
