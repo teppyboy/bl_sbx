@@ -137,6 +137,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho(f"Uploading {overridefile.name}", fg="yellow")
         remote_file_path = f"Downloads/{path.name}"
         afc.push(overridefile, remote_file_path)
+        relative_files.append(Path(path.name))
 
     # WIP iOS slop
     # shutil.rmtree("Downloads", ignore_errors=True)
@@ -167,10 +168,13 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         click.secho("Relative path: " + str(relative_path), fg="bright_black")
         # Craft our epub file here
         epub_path = Path("hax.epub")
+        target_file = overridefile.joinpath(relative_path)
+        if total_files == 1:
+            target_file = overridefile
         with zipfile.ZipFile(epub_path, 'w') as epub:
             # Add mimetype file
             epub.writestr("Caches/mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-            epub.write(overridefile.joinpath(relative_path), f"Caches/{relative_path.as_posix()}", compress_type=zipfile.ZIP_DEFLATED)
+            epub.write(target_file, f"Caches/{relative_path.as_posix()}", compress_type=zipfile.ZIP_DEFLATED)
         afc.push(epub_path, "Downloads/hax.epub")
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
         blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
