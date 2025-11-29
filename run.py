@@ -53,18 +53,7 @@ def start_http_server():
     global http_server_info
     http_server_info = (get_lan_ip(), httpd.server_port)
     httpd.serve_forever()
-
-def ensure_afc_directory(afc: AfcService, remote_path: str):
-    """Ensure all parent directories exist on the device."""
-    parts = PurePosixPath(remote_path).parent.parts
-    current_path = ""
-    for part in parts:
-        current_path = f"{current_path}/{part}" if current_path else part
-        try:
-            afc.makedirs(current_path)
-        except Exception:
-            # Directory might already exist
-            pass
+    
 
 def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxyService):
     http_thread = threading.Thread(target=start_http_server, daemon=True)
@@ -119,7 +108,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     if overridefile.is_dir():
         # Upload directory
         total_files = 0
-        click.secho(f"Uploading contents of directory {overridefile.name}", fg="yellow")
+        click.secho(f"Uploading contents of directory '{overridefile}'", fg="yellow")
         for root, dirs, files in os.walk(overridefile):
             for file in files:
                 local_file_path = Path(root) / file
@@ -127,11 +116,10 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
                 relative_files.append(relative_path)
                 remote_file_path = f"Downloads/{relative_path.as_posix()}"
                 # remote_file_paths.append(remote_file_path)
-                click.secho(f"Uploading {relative_path.as_posix()} to {remote_file_path}", fg="bright_black")
-                # Ensure parent directories exist
-                ensure_afc_directory(afc, remote_file_path)
-                afc.push(local_file_path, remote_file_path)
+                click.secho(f"Checking {relative_path.as_posix()} -> {remote_file_path}", fg="bright_black")
                 total_files += 1
+        click.secho(f"Actually uploading {total_files} files...", fg="yellow")
+        afc.push(overridefile, f"Downloads/{overridefile.name}")
     else:
         # Upload the file
         click.secho(f"Uploading {overridefile.name}", fg="yellow")
