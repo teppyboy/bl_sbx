@@ -227,12 +227,12 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         
         # Wait for itunesstored to finish download and raise an error
         click.secho("Waiting for itunesstored to finish download...", fg="yellow")
-        download_timeout = 60  # seconds
+        download_timeout = 15  # seconds
         download_start_time = time.time()
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
             # Check for timeout
             if time.time() - download_start_time > download_timeout:
-                click.secho("Download wait timeout reached, continuing...", fg="yellow")
+                click.secho("Download wait timeout reached, continuing...", fg="red")
                 break
             
             if "6936249076851270150" in syslog_entry.message:
@@ -280,6 +280,8 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
                 click.secho(f"Found Install-Mgr message: {syslog_entry.message}", fg="bright_black")
             if success_message in syslog_entry.message:
                 click.secho(f"Found install-mgr success message: {syslog_entry.message}", fg="bright_black")
+            if "hax.epub" in syslog_entry.message:
+                click.secho(f"Found hax.epub: {syslog_entry.message}", fg="bright_black")
             if (PurePosixPath(syslog_entry.filename).name == 'bookassetd') and \
                     success_message in syslog_entry.message and relative_path.name in syslog_entry.message:
                     break
