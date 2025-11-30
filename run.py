@@ -129,7 +129,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     shutil.rmtree("Downloads", ignore_errors=True)
     Path("Downloads").mkdir()
     if overridefile.is_file():
-        shutil.copyfile(overridefile, Path("Downloads") / overridefile.name)
+        shutil.copyfile(overridefile, Path("Downloads") / path.name)
     else:
         shutil.copytree(overridefile, Path("Downloads"), dirs_exist_ok=True)
 
